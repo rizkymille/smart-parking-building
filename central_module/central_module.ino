@@ -1,163 +1,201 @@
-#include <WiFi.h>
-#include <Servo.h>
-#include <RH_ASK.h>
-#include <SPI.h>
-#include <Wire.h> 
 #include <LiquidCrystal_I2C.h>
-#include <MFRC522.h>
+#include <Wire.h>
 
-#define SS_PIN 10
-#define RST_PIN 9
-MFRC522 mfrc522(SS_PIN, RST_PIN);   // Create MFRC522 instance.
+#include <Servo.h>
 
-char* ssid = "Millennianno's Ideapad Slim 3";  
-char* password = "mille1219";
+#include <ESP8266WiFi.h>
+#include <WiFiClient.h>
+#include <ESP8266WebServer.h>
 
-// for IoT feature
-WiFiServer server(8888);
-WiFiClient client;
+// RFID
+#define sda D4
+#define rst D3
+#include <KRrfid.h>
 
-String header;
+// LASER
+#define PIN_LSR_RECV A0
+#define LSR_THRESH 50
 
-RH_ASK driver; // for RF reciever
-Servo servo_parking; // for servo
+#define PIN_SRVO D8
 
-LiquidCrystal_I2C lcd(0x27,16,2);  // set the LCD address to 0x27 for a 16 chars and 2 line display
+const char* ssid = "Millennianno's Ideapad Slim 3";
+const char* password = "mille1219";
 
-int val;
-int potpin = 0;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+ESP8266WebServer server(8888);   //instantiate server at port 80 (http port)
+
+bool open_gate[2];
+
+String saved_tag;
+int time_in[3];
+
+char* txt;
+uint8_t buf[12];
+uint8_t buflen;
+
+int hours, minutes, seconds;
+
+int avail = 1;
+int total = 1;
+
+int old_D0;
+int read_D0;
+
+String page = "";
+
+Servo palang;
+
+float read_laser() {
+  static float laser;
+  laser = map(analogRead(PIN_LSR_RECV), 0, 1024, 0, 100);
+  return laser;
+}
 
 void setup() {
+
   Serial.begin(115200);
-  SPI.begin();      // Initiate  SPI bus
 
-  servo_parking.attach(0);
+  pinMode(D0, INPUT);
 
+  // LCD initialize
+  lcd.begin(16,2);
   lcd.init();
   lcd.backlight();
+
+  lcd.setCursor(0,0);
+  lcd.print("SILAKAN");
+  lcd.setCursor(0,1);
+  lcd.print("TAP KARTU");
+
+  // RFID initialize
+  rfidBegin();
+
+  palang.attach(PIN_SRVO);
+  palang.write(0);
+
+  Serial.begin(115200);
+  WiFi.begin(ssid, password); //begin WiFi connection
+  Serial.println("");
   
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  WiFi.begin(ssid, password);
+  // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  // Print local IP address and start web server
   Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.println("IP address: ");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  mfrc522.PCD_Init();   // Initiate MFRC522
+  server.on("/", [](){
+    page = "<h1>Smart Parking Kel 1</h1><h3>Parkir:"+String(avail)+"/"+String(total)+"</h3>";
+    server.send(200, "text/html", page);
+  });
+
   server.begin();
+     
 }
 
 void loop() {
-  client = server.available();   // Listen for incoming clients
-  
-  if (client) {                             // If a new client connects,
-    Serial.println("New Client.");          // print a message out in the serial port
-    String currentLine = "";                // make a String to hold incoming data from the client
+
+  //Server.println("Tes loop");
+
+  getTAG(); 
+
+  if(TAG!="") {
+    Serial.print("TAG: ");
+    Serial.println(TAG);
+    Serial.print("Recieve laser: ");
+    Serial.println(read_laser());
+    if(saved_tag != TAG){
+      open_gate[0] = true;
+      time_in[0] = hours;
+      time_in[1] = minutes;
+      time_in[3] = seconds;
+      saved_tag = TAG;
+    }
+    else {
+      open_gate[1] = true;
+      saved_tag = "";
+    }
+    delay(3000);
+    TAG = "";
+  }
+
+  // in gate
+  if(open_gate[0] && (read_laser() > LSR_THRESH)) {
+    palang.write(90);
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("SILAKAN MASUK");
+    lcd.setCursor(0,1);
+    lcd.print("TARIF: 2000/JAM");
+
+    delay(2000);
+  }
+  else if (open_gate[0] && (read_laser() < LSR_THRESH)) {
+    delay(2000);
+
+    palang.write(0);
     
-    while (client.connected()) {            // loop while the client's connected
-      
-      if (client.available()) {             // if there's bytes to read from the client,
-        char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out the serial monitor
-        header += c;
-        
-        if (c == '\n') {                    // if the byte is a newline character
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
-          
-          if (currentLine.length() == 0) {
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println("Connection: close");
-            client.println();
-            client.println("<!DOCTYPE html>\n");
-            client.println("<html>\n");
-            client.println("<body>\n");
-            client.println("<center>\n");
-            client.println("<h1 style=\"color:blue;\">ESP32 webserver</h1>\n");
-            client.println("<h2 style=\"color:green;\">Hello World Web Sever</h2>\n");
-            client.println("<h2 style=\"color:blue;\">Password protected Web server</h2>\n");
-            client.println("</center>\n");
-            client.println("</body>\n");
-            client.println("</html>");
-            break;            
-          } 
-          else { // if you got a newline, then clear currentLine
-            currentLine = "";
-          }
-        } 
-        else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-      }
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("SILAKAN");
+    lcd.setCursor(0,1);
+    lcd.print("TAP KARTU");
+    open_gate[0] = false;
+
+  }
+
+  // out gate
+  if(open_gate[1]) {
+
+    palang.write(90);
+    
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("DURASI:");
+    lcd.setCursor(8,0);
+    lcd.print(hours-time_in[0]);
+    lcd.setCursor(10,0);
+    lcd.print("h");
+    lcd.setCursor(12,0);
+    lcd.print(minutes-time_in[1]);
+    lcd.setCursor(14,0);
+    lcd.print("m");
+    lcd.setCursor(0,1);
+    lcd.print("TARIF:");
+    lcd.setCursor(8,0);
+    lcd.print(2000*(hours-time_in[0]));
+
+    delay(3000);
+
+    palang.write(0);
+
+    lcd.clear();
+    lcd.setCursor(0,0);
+    lcd.print("SILAKAN");
+    lcd.setCursor(0,1);
+    lcd.print("TAP KARTU");
+    open_gate[1] = false;
+  }
+
+  read_D0 = digitalRead(D0);
+
+  if(old_D0 != read_D0) {
+    if(read_D0) {
+      avail--;
+    }
+    else {
+      avail++;
     }
   }
 
-  // Clear the header variable
-  header = "";
-  // Close the connection
-  client.stop();
-  Serial.println("Client disconnected.");
-  Serial.println("");
+  delay(200);
 
+  old_D0 = read_D0;
 
-  // recieving RF message
-  uint8_t buf[12];
-  uint8_t buflen = sizeof(buf);
-  if (driver.recv(buf, &buflen)) {
-    int i;
-    // Message with a good checksum received, dump it.
-    Serial.print("Message: ");
-    Serial.println((char*)buf);         
-  }
-
-  // print LCD
-  lcd.setCursor(0,0);
-  lcd.print("hello everyone");
-  lcd.setCursor(0,1);
-  lcd.print("konichiwaa");
-
-  // servo
-  val = analogRead(potpin);            // reads the value of the potentiometer (value between 0 and 1023)
-  val = map(val, 0, 1023, 0, 180);     // scale it to use it with the servo (value between 0 and 180)
-  servo_parking.write(val);                  // sets the servo position according to the scaled value
-
-  // rfid reader
-  if (!mfrc522.PICC_IsNewCardPresent()) {
-    return;
-  }
-  // Select one of the cards
-  if (!mfrc522.PICC_ReadCardSerial()) {
-    return;
-  }
-  // Show UID on serial monitor
-  Serial.print("UID tag :");
-  String content= "";
-  byte letter;
-  for (byte i = 0; i < mfrc522.uid.size; i++) {
-    Serial.print(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " ");
-    Serial.print(mfrc522.uid.uidByte[i], HEX);
-    content.concat(String(mfrc522.uid.uidByte[i] < 0x10 ? " 0" : " "));
-    content.concat(String(mfrc522.uid.uidByte[i], HEX));
-  }
-  Serial.println();
-  Serial.print("Message : ");
-  content.toUpperCase();
-  if (content.substring(1) == "BD 31 15 2B") {
-    Serial.println("Authorized access");
-    Serial.println();
-    delay(3000);
-  }
- 
- else {
-    Serial.println(" Access denied");
-    delay(3000);
-  }
-  
+  server.handleClient();
 }
